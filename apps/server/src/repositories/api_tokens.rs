@@ -42,8 +42,32 @@ pub enum ApiTokenScope {
     Read,
     Write,
     DocsRead,
+    DocsWrite,
     ChatRead,
+    ChatWrite,
+    ProjectsWrite,
     Mcp,
+}
+
+impl ApiTokenScope {
+    /// The optional MCP scopes, stored by name in `mcp_scopes` (tokens) and grants (OAuth).
+    pub const OPTIONAL: [(&'static str, Self); 5] = [
+        ("docs:read", Self::DocsRead),
+        ("docs:write", Self::DocsWrite),
+        ("chat:read", Self::ChatRead),
+        ("chat:write", Self::ChatWrite),
+        ("projects:write", Self::ProjectsWrite),
+    ];
+
+    /// The optional scopes named in a space-separated list; unknown names are ignored.
+    #[must_use]
+    pub fn optional(names: &str) -> Vec<Self> {
+        Self::OPTIONAL
+            .into_iter()
+            .filter(|(name, _)| names.split_whitespace().any(|s| s == *name))
+            .map(|(_, scope)| scope)
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -253,20 +277,12 @@ impl ApiTokenRepository {
         .ok_or(ApiTokenError::NotFound)?;
         let can_read = row.get::<i64, _>("can_read") != 0;
         let can_write = row.get::<i64, _>("can_write") != 0;
+        let optional = ApiTokenScope::optional(&row.get::<String, _>("mcp_scopes"));
         let allowed = match required_scope {
             ApiTokenScope::Read => can_read,
             ApiTokenScope::Write => can_write,
-            ApiTokenScope::DocsRead => row
-                .get::<String, _>("mcp_scopes")
-                .split_whitespace()
-                .any(|s| s == "docs:read"),
-            ApiTokenScope::ChatRead => row
-                .get::<String, _>("mcp_scopes")
-                .split_whitespace()
-                .any(|s| s == "chat:read"),
-            ApiTokenScope::Mcp => {
-                can_read || can_write || !row.get::<String, _>("mcp_scopes").is_empty()
-            }
+            ApiTokenScope::Mcp => can_read || can_write || !optional.is_empty(),
+            scope => optional.contains(&scope),
         };
         if !allowed {
             return Err(ApiTokenError::Forbidden);
@@ -305,18 +321,11 @@ impl ApiTokenRepository {
             scopes: [
                 (can_read, ApiTokenScope::Read),
                 (can_write, ApiTokenScope::Write),
-                (
-                    row.get::<String, _>("mcp_scopes").contains("docs:read"),
-                    ApiTokenScope::DocsRead,
-                ),
-                (
-                    row.get::<String, _>("mcp_scopes").contains("chat:read"),
-                    ApiTokenScope::ChatRead,
-                ),
             ]
             .into_iter()
             .filter(|(enabled, _)| *enabled)
             .map(|(_, scope)| scope)
+            .chain(optional)
             .collect(),
         })
     }

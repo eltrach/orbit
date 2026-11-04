@@ -128,6 +128,51 @@ async fn scenario(database: &Database) {
     assert!(principal.scopes.contains(&ApiTokenScope::ChatRead));
     assert!(!principal.scopes.contains(&ApiTokenScope::Read));
     assert!(!principal.scopes.contains(&ApiTokenScope::Write));
+    assert!(!principal.scopes.contains(&ApiTokenScope::DocsWrite));
+    let writer = tokens
+        .create_scoped(
+            seed.workspace,
+            seed.owner,
+            "Content writer".into(),
+            seed.projects.to_vec(),
+            false,
+            false,
+            false,
+            None,
+            "test",
+            now,
+            "docs:write chat:write projects:write",
+        )
+        .await
+        .unwrap();
+    let principal = tokens
+        .authenticate(&writer.token, ApiTokenScope::Mcp, now)
+        .await
+        .unwrap();
+    for scope in [
+        ApiTokenScope::DocsWrite,
+        ApiTokenScope::ChatWrite,
+        ApiTokenScope::ProjectsWrite,
+    ] {
+        assert!(principal.scopes.contains(&scope));
+    }
+    assert!(!principal.scopes.contains(&ApiTokenScope::Write));
+    assert!(
+        tokens
+            .authenticate(&writer.token, ApiTokenScope::ProjectsWrite, now)
+            .await
+            .is_ok()
+    );
+    assert!(
+        tokens
+            .authenticate(&writer.token, ApiTokenScope::Write, now)
+            .await
+            .is_err()
+    );
+    tokens
+        .revoke(seed.workspace, writer.api_token.id, seed.owner, "test", now)
+        .await
+        .unwrap();
     assert!(
         tokens
             .list(seed.workspace, seed.owner)
@@ -248,7 +293,7 @@ async fn scenario(database: &Database) {
             .scalar::<i64>("SELECT COUNT(*) FROM audit_events")
             .await
             .unwrap(),
-        6
+        8
     );
 
     // The schema trigger refuses a project from another workspace on both backends.

@@ -968,6 +968,19 @@ impl TaskRepository {
         })
     }
 
+    /// One status of a live project, for writes that change only some of its fields.
+    pub async fn status(
+        &self,
+        workspace_id: Id,
+        project_id: Id,
+        status_id: Id,
+        actor_id: Id,
+    ) -> Result<StatusRecord, TaskError> {
+        let mut tx = self.database.pool().begin().await?;
+        require_project_tx(&mut tx, workspace_id, project_id, actor_id).await?;
+        status_in_tx(&mut tx, workspace_id, project_id, status_id).await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn create_status(
         &self,
