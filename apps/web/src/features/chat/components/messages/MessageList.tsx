@@ -693,9 +693,9 @@ export function MessageList({
           <PopoverContent anchor={overlay.anchor} side="bottom" align={overlay.align} className="w-auto gap-0 p-0">
             <EmojiPicker
               custom
-              onPick={(emoji) => {
+              onPick={(emoji, { several }) => {
                 if (overlayMessage) react(overlayMessage, emoji)
-                onOverlayOpenChange(false)
+                if (!several) onOverlayOpenChange(false)
               }}
             />
           </PopoverContent>

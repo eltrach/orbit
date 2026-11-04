@@ -1,5 +1,5 @@
 import { EmojiPicker as Frimousse, type EmojiPickerListCategoryHeaderProps, type EmojiPickerListEmojiProps, type EmojiPickerListRowProps } from 'frimousse'
-import { useContext, useState } from 'react'
+import { useContext, useRef, useState } from 'react'
 import { Search4 as Search } from 'reicon-react'
 import { Button } from '@/components/ui/button'
 import { Tip } from '@/components/common/Tip'
@@ -37,9 +37,21 @@ function EmojiButton({ emoji, ...props }: EmojiPickerListEmojiProps) {
  * The emoji data comes from Orbit itself, not from a CDN. `onRemove` adds a Remove action (page and callout icons).
  * `custom` (chat only) adds the workspace's custom emoji in a group above the list; one of them is picked as the text
  * `:name:`. Frimousse has no place for entries that are not characters, so the group is ours and the search filters it.
+ * `several` is true when Shift was held for the pick (a click or `Enter`): the chat callers keep the panel open so the
+ * user can pick more than one emoji, and the footer says so when `custom` is on.
  */
-export function EmojiPicker({ onPick, onRemove, custom = false }: { onPick: (emoji: string) => void; onRemove?: () => void; custom?: boolean }) {
+export function EmojiPicker({
+  onPick,
+  onRemove,
+  custom = false,
+}: {
+  onPick: (emoji: string, options: { several: boolean }) => void
+  onRemove?: () => void
+  custom?: boolean
+}) {
   const customEmoji = useContext(CustomEmojiContext)
+  // Frimousse does not pass the event to `onEmojiSelect`: the capture phase notes Shift before its handler runs
+  const shift = useRef(false)
   const [search, setSearch] = useState('')
   const query = search.trim().toLowerCase()
   const customNames = custom ? [...customEmoji.keys()].filter((name) => name.includes(query)) : []
@@ -51,7 +63,9 @@ export function EmojiPicker({ onPick, onRemove, custom = false }: { onPick: (emo
       emojiVersion={EMOJI_VERSION}
       emojibaseUrl={EMOJIBASE_PATH}
       className="isolate flex h-[380px] w-fit flex-col"
-      onEmojiSelect={({ emoji }) => onPick(normalizeEmoji(emoji))}
+      onClickCapture={(event) => (shift.current = event.shiftKey)}
+      onKeyDownCapture={(event) => (shift.current = event.shiftKey)}
+      onEmojiSelect={({ emoji }) => onPick(normalizeEmoji(emoji), { several: shift.current })}
     >
       <div className="flex items-center gap-2 p-2 pb-0">
         <label className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md bg-secondary/60 px-2.5 text-muted-foreground ring-ring/50 ring-inset focus-within:ring-1">
@@ -76,7 +90,7 @@ export function EmojiPicker({ onPick, onRemove, custom = false }: { onPick: (emo
                 data-slot="emoji-button"
                 aria-label={`:${name}:`}
                 className="flex size-9 items-center justify-center rounded-md text-xl outline-none hover:bg-muted focus-visible:bg-muted"
-                onClick={() => onPick(`:${name}:`)}
+                onClick={(event) => onPick(`:${name}:`, { several: event.shiftKey })}
               >
                 <Emoji value={`:${name}:`} />
               </button>
@@ -102,7 +116,7 @@ export function EmojiPicker({ onPick, onRemove, custom = false }: { onPick: (emo
                 <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{emoji.label}</span>
               </>
             ) : (
-              <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">Pick an emoji</span>
+              <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{custom ? 'Pick an emoji · Shift to pick several' : 'Pick an emoji'}</span>
             )
           }
         </Frimousse.ActiveEmoji>

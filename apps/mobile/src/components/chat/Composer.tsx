@@ -278,7 +278,7 @@ export function Composer({ state, placeholder, nameOf, alsoSendTo }: { state: Co
         ]}
         onClose={() => setAttachOpen(false)}
       />
-      <EmojiPicker visible={emojiOpen} onPick={(emoji) => setDraft(`${draft}${emoji}`)} onClose={() => setEmojiOpen(false)} />
+      <EmojiPicker visible={emojiOpen} several onPick={(emoji) => setDraft((current) => `${current}${emoji}`)} onClose={() => setEmojiOpen(false)} />
     </View>
   )
 }

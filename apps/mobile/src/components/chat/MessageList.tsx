@@ -136,7 +136,7 @@ export function useMessageSheet({ inThread, composer, loaded, onMarkedUnread }: 
           ) : undefined
         }
       />
-      <EmojiPicker visible={picking !== null} onPick={(emoji) => picking && react(picking, emoji)} onClose={() => setPicking(null)} />
+      <EmojiPicker visible={picking !== null} several onPick={(emoji) => picking && react(picking, emoji)} onClose={() => setPicking(null)} />
     </>
   )
 

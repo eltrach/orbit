@@ -169,7 +169,8 @@ export function Composer({ ref, conversation, threadRootId = null, replyTo = nul
     onSent?.()
   }
 
-  function insertAtCursor(insertion: string) {
+  /** `focus: false` leaves the focus where it is (the emoji picker kept open with Shift) and still moves the cursor. */
+  function insertAtCursor(insertion: string, focus = true) {
     const element = input.current
     const start = element?.selectionStart ?? text.length
     const end = element?.selectionEnd ?? text.length
@@ -178,7 +179,7 @@ export function Composer({ ref, conversation, threadRootId = null, replyTo = nul
     setText(next)
     requestAnimationFrame(() => {
       if (!element) return
-      element.focus()
+      if (focus) element.focus()
       element.setSelectionRange(cursor, cursor)
       mention.update(next, cursor)
     })
@@ -342,9 +343,9 @@ export function Composer({ ref, conversation, threadRootId = null, replyTo = nul
               <PopoverContent side="top" align="start" finalFocus={input} className="w-auto gap-0 p-0">
                 <EmojiPicker
                   custom
-                  onPick={(emoji) => {
-                    setEmojiOpen(false)
-                    insertAtCursor(emoji)
+                  onPick={(emoji, { several }) => {
+                    if (!several) setEmojiOpen(false)
+                    insertAtCursor(emoji, !several)
                   }}
                 />
               </PopoverContent>

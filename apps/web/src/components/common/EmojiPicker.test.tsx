@@ -20,3 +20,15 @@ test('a click on an emoji gives its character', async () => {
   await userEvent.click(await view.findByRole('gridcell', { name: 'Grinning face' }, { timeout: 4000 }))
   expect(picked).toEqual(['😀'])
 })
+
+test('a Shift-click asks to pick several, a plain click does not', async () => {
+  const picks: boolean[] = []
+  const view = render(<EmojiPicker onPick={(_, { several }) => picks.push(several)} />)
+  const cell = await view.findByRole('gridcell', { name: 'Grinning face' }, { timeout: 4000 })
+  const user = userEvent.setup()
+  await user.keyboard('{Shift>}')
+  await user.click(cell)
+  await user.keyboard('{/Shift}')
+  await user.click(cell)
+  expect(picks).toEqual([true, false])
+})
