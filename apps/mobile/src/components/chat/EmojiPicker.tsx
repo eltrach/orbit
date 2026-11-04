@@ -26,9 +26,10 @@ const rowsOf = (entries: { key: string; value: string; label: string }[], column
 
 /**
  * The web `EmojiPicker` as a sheet: a search field, the workspace's custom emoji first (for reactions and the
- * composer), then the emojibase groups the server serves.
+ * composer), then the emojibase groups the server serves. With `several` (the web's Shift-click), a long press picks
+ * an emoji and keeps the sheet open for more.
  */
-export function EmojiPicker({ visible, onPick, onClose }: { visible: boolean; onPick: (emoji: string) => void; onClose: () => void }) {
+export function EmojiPicker({ visible, onPick, onClose, several = false }: { visible: boolean; onPick: (emoji: string) => void; onClose: () => void; several?: boolean }) {
   const { colors, scheme } = useTheme()
   const groups = useEmojiGroups()
   const custom = useCustomEmoji()
@@ -83,6 +84,7 @@ export function EmojiPicker({ visible, onPick, onClose }: { visible: boolean; on
                     onPick(cell.value)
                     close()
                   }}
+                  onLongPress={several ? () => onPick(cell.value) : undefined}
                   className="items-center justify-center rounded-md active:bg-muted" style={{ width: CELL, height: CELL }}
                 >
                   <Emoji value={cell.value} size={30} />
