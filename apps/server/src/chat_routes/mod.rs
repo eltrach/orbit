@@ -72,78 +72,88 @@ impl ChatState {
         actor_id: Id,
         write: impl Future<Output = Result<Written<T>, ChatError>>,
     ) -> Result<(Written<T>, u64), ChatError> {
-        let _order = self.hub.write_lock(workspace_id).await;
-        let written = write.await?;
-        let events: Vec<NewEvent> = written
-            .events
-            .iter()
-            .map(|emitted| NewEvent {
-                recipients: emitted.recipients.clone(),
-                topic: TOPIC,
-                event: serde_json::to_value(&emitted.event).unwrap_or_default(),
-            })
-            .collect();
-        // The number of the write's last event. A client that has seen it on its socket knows
-        // that the response is not news, and that it must not put it over newer events.
-        let seq = match self.hub.publish(workspace_id, &events).await {
-            Ok(seq) => seq,
-            Err(error) => {
-                // The write is done; the sockets miss its events until they resync. No socket
-                // has seen this number, so the writer's client applies the response.
-                tracing::warn!(error = %error, "chat events for the live socket");
-                UNSEEN_SEQ
-            }
-        };
-        if !written.inbox.is_empty() {
-            self.hub.signal(
-                workspace_id,
-                &Recipients::Users(written.inbox.clone()),
-                "inbox",
-                &serde_json::json!({ "type": "changed" }),
-            );
-        }
-        // The write changed counters of other members. Their states are read here, for the
-        // members who are connected only, so a send costs the same in a channel of any size.
-        let others: Vec<Id> = self
-            .hub
-            .online(workspace_id)
-            .into_iter()
-            .filter(|user_id| *user_id != actor_id)
-            .collect();
-        let mut states = Vec::new();
-        if let Some(conversation_id) = written.counted {
-            match self.chat.states_for(conversation_id, &others).await {
-                Ok(found) => states.extend(
-                    found
-                        .into_iter()
-                        .map(|(user_id, state)| (user_id, ChatEvent::StateChanged { state })),
-                ),
-                Err(error) => tracing::warn!(error = %error, "chat states for the live socket"),
-            }
-        }
-        if let Some(root_id) = written.replied {
-            match self.chat.thread_states_for(root_id, &others).await {
-                Ok(found) => states.extend(
-                    found
-                        .into_iter()
-                        .map(|(user_id, state)| (user_id, ChatEvent::ThreadChanged { state })),
-                ),
-                Err(error) => tracing::warn!(error = %error, "thread states for the live socket"),
-            }
-        }
-        let states: Vec<NewEvent> = states
-            .into_iter()
-            .map(|(user_id, event)| NewEvent {
-                recipients: Recipients::Users(vec![user_id]),
-                topic: TOPIC,
-                event: serde_json::to_value(&event).unwrap_or_default(),
-            })
-            .collect();
-        if let Err(error) = self.hub.publish(workspace_id, &states).await {
-            tracing::warn!(error = %error, "chat states for the live socket");
-        }
-        Ok((written, seq))
+        publish(&self.hub, &self.chat, workspace_id, actor_id, write).await
     }
+}
+
+/// [`ChatState::publish`] for callers without a chat state (the MCP tools).
+pub(crate) async fn publish<T>(
+    hub: &LiveHub,
+    chat: &ChatRepository,
+    workspace_id: Id,
+    actor_id: Id,
+    write: impl Future<Output = Result<Written<T>, ChatError>>,
+) -> Result<(Written<T>, u64), ChatError> {
+    let _order = hub.write_lock(workspace_id).await;
+    let written = write.await?;
+    let events: Vec<NewEvent> = written
+        .events
+        .iter()
+        .map(|emitted| NewEvent {
+            recipients: emitted.recipients.clone(),
+            topic: TOPIC,
+            event: serde_json::to_value(&emitted.event).unwrap_or_default(),
+        })
+        .collect();
+    // The number of the write's last event. A client that has seen it on its socket knows
+    // that the response is not news, and that it must not put it over newer events.
+    let seq = match hub.publish(workspace_id, &events).await {
+        Ok(seq) => seq,
+        Err(error) => {
+            // The write is done; the sockets miss its events until they resync. No socket
+            // has seen this number, so the writer's client applies the response.
+            tracing::warn!(error = %error, "chat events for the live socket");
+            UNSEEN_SEQ
+        }
+    };
+    if !written.inbox.is_empty() {
+        hub.signal(
+            workspace_id,
+            &Recipients::Users(written.inbox.clone()),
+            "inbox",
+            &serde_json::json!({ "type": "changed" }),
+        );
+    }
+    // The write changed counters of other members. Their states are read here, for the
+    // members who are connected only, so a send costs the same in a channel of any size.
+    let others: Vec<Id> = hub
+        .online(workspace_id)
+        .into_iter()
+        .filter(|user_id| *user_id != actor_id)
+        .collect();
+    let mut states = Vec::new();
+    if let Some(conversation_id) = written.counted {
+        match chat.states_for(conversation_id, &others).await {
+            Ok(found) => states.extend(
+                found
+                    .into_iter()
+                    .map(|(user_id, state)| (user_id, ChatEvent::StateChanged { state })),
+            ),
+            Err(error) => tracing::warn!(error = %error, "chat states for the live socket"),
+        }
+    }
+    if let Some(root_id) = written.replied {
+        match chat.thread_states_for(root_id, &others).await {
+            Ok(found) => states.extend(
+                found
+                    .into_iter()
+                    .map(|(user_id, state)| (user_id, ChatEvent::ThreadChanged { state })),
+            ),
+            Err(error) => tracing::warn!(error = %error, "thread states for the live socket"),
+        }
+    }
+    let states: Vec<NewEvent> = states
+        .into_iter()
+        .map(|(user_id, event)| NewEvent {
+            recipients: Recipients::Users(vec![user_id]),
+            topic: TOPIC,
+            event: serde_json::to_value(&event).unwrap_or_default(),
+        })
+        .collect();
+    if let Err(error) = hub.publish(workspace_id, &states).await {
+        tracing::warn!(error = %error, "chat states for the live socket");
+    }
+    Ok((written, seq))
 }
 
 /// The topic of chat events on the live socket.

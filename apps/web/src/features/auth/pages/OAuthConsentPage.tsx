@@ -14,6 +14,23 @@ import { oauthRequest, type OAuthConsent } from '@/features/auth/oauth'
 // Anonymous consent sessions must not trigger the app-wide /login redirect.
 const consentClient = createApiClient()
 
+const OPTIONAL_SCOPES = [
+  ['tasks:write', 'Create, change and delete tasks in selected projects'],
+  ['projects:write', 'Rename selected projects and edit their workflow statuses'],
+  ['docs:read', 'Read workspace docs visible to you, including private docs'],
+  ['docs:write', 'Create, edit, move and trash docs you can edit'],
+  ['chat:read', 'Read chat visible to you, including private channels and direct messages'],
+  ['chat:write', 'Send messages as you, edit your messages and react'],
+] as const
+
+// A write permission includes the read permission of its area.
+const READ_OF: Record<string, string> = { 'docs:write': 'docs:read', 'chat:write': 'chat:read' }
+
+function toggleScope(current: string[], scope: string, checked: boolean) {
+  if (checked) return [...new Set([...current, scope, ...(READ_OF[scope] ? [READ_OF[scope]] : [])])]
+  return current.filter((s) => s !== scope && READ_OF[s] !== scope)
+}
+
 export function OAuthConsentPage() {
   const [params] = useSearchParams()
   const request = params.get('request') ?? ''
@@ -69,7 +86,7 @@ export function OAuthConsentPage() {
     {user.isError || consent.isError || !/^[A-Za-z0-9_-]{43}$/.test(request) ? <p role="alert">This request is not available. Restart the connection from your MCP client.</p> : consent.data ? <>
       <p><strong>{consent.data.client_name}</strong> wants to connect to the workspace and projects you select.</p>
       <p className="rounded-md border border-input p-3 text-sm">If you allow access, Orbit sends the access code to <strong className="break-all">{consent.data.redirect_to}</strong>. Allow it only if you started this connection and you trust that address. The client chose its own name, and Orbit did not verify it.</p>
-      <p className="text-sm text-muted-foreground">Signed in as {user.data?.display_name}. Tasks are read-only unless you enable task writes below.</p>
+      <p className="text-sm text-muted-foreground">Signed in as {user.data?.display_name}. Tasks are read-only unless you enable writes below.</p>
       <Label>Workspace<Select value={workspace} onValueChange={(value) => { setWorkspace(value ?? ''); setSelected([]) }}>
         <SelectTrigger><SelectValue placeholder="Select a workspace">{workspaces.find(([id]) => id === workspace)?.[1] ?? 'Select a workspace'}</SelectValue></SelectTrigger>
         <SelectContent>{workspaces.map(([id, name]) => <SelectItem key={id} value={id}>{name}</SelectItem>)}</SelectContent>
@@ -82,8 +99,8 @@ export function OAuthConsentPage() {
         {!workspaces.length ? <p className="text-sm text-muted-foreground">No active projects are available to your account.</p> : null}
       </fieldset>
       <fieldset className="grid gap-3"><legend className="mb-3 text-sm font-medium">Optional permissions</legend>
-        {([['tasks:write', 'Create, change and delete tasks in selected projects'], ['docs:read', 'Read workspace docs visible to you, including private docs'], ['chat:read', 'Read chat visible to you, including private channels and direct messages']] as const).map(([scope, label]) => <Label key={scope} className="flex items-center gap-2">
-          <Checkbox checked={scopes.includes(scope)} onCheckedChange={(checked) => setScopes((current) => checked ? [...current, scope] : current.filter((s) => s !== scope))} />{label}
+        {OPTIONAL_SCOPES.map(([scope, label]) => <Label key={scope} className="flex items-center gap-2">
+          <Checkbox checked={scopes.includes(scope)} onCheckedChange={(checked) => setScopes((current) => toggleScope(current, scope, Boolean(checked)))} />{label}
         </Label>)}
       </fieldset>
       <div className="grid gap-2">

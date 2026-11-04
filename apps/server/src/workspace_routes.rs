@@ -639,8 +639,14 @@ enum ApiTokenScope {
     Write,
     #[serde(rename = "docs:read")]
     DocsRead,
+    #[serde(rename = "docs:write")]
+    DocsWrite,
     #[serde(rename = "chat:read")]
     ChatRead,
+    #[serde(rename = "chat:write")]
+    ChatWrite,
+    #[serde(rename = "projects:write")]
+    ProjectsWrite,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -705,7 +711,15 @@ async fn create_api_token(
             && body
                 .scopes
                 .iter()
-                .any(|s| matches!(s, ApiTokenScope::DocsRead | ApiTokenScope::ChatRead)))
+                .any(|s| {
+                    matches!(
+                        s,
+                        ApiTokenScope::DocsRead
+                            | ApiTokenScope::DocsWrite
+                            | ApiTokenScope::ChatRead
+                            | ApiTokenScope::ChatWrite
+                    )
+                }))
     {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -729,8 +743,11 @@ async fn create_api_token(
         .iter()
         .filter_map(|s| match s {
             ApiTokenScope::DocsRead => Some("docs:read"),
+            ApiTokenScope::DocsWrite => Some("docs:write"),
             ApiTokenScope::ChatRead => Some("chat:read"),
-            _ => None,
+            ApiTokenScope::ChatWrite => Some("chat:write"),
+            ApiTokenScope::ProjectsWrite => Some("projects:write"),
+            ApiTokenScope::Read | ApiTokenScope::Write => None,
         })
         .collect::<Vec<_>>()
         .join(" ");

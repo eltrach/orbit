@@ -128,11 +128,15 @@ needed. In your MCP client, choose **Streamable HTTP** and **OAuth**, then enter
 1. The client discovers Orbit's authorization server and registers as a public
    client with a callback URI.
 2. Orbit opens its sign-in page if you are not signed in.
-3. Select a workspace and the projects that the client may read.
-4. Click **Allow read access**. Orbit returns an authorization code to the client.
+3. Select a workspace, the projects that the client may use, and any optional
+   permissions (see [Permissions and tools](#permissions-and-tools)).
+4. Click **Allow read access** (or **Allow selected access**). Orbit returns an
+   authorization code to the client.
 5. The client exchanges the code using its S256 PKCE verifier and connects.
 
-The only scope is `tasks:read`. Project selection is stored in the grant, not in
+`tasks:read` is always granted. The optional scopes are `tasks:write`,
+`projects:write`, `docs:read`, `docs:write`, `chat:read` and `chat:write`; Orbit grants
+only the ones you check, whatever the client asked for. Project selection is stored in the grant, not in
 client-supplied tool arguments. Access tokens last 15 minutes. Refresh tokens
 last 30 days and rotate on every successful refresh. Reuse of a consumed refresh
 token revokes the entire connection. Authorization codes last one minute, can
@@ -212,7 +216,9 @@ and ancestors are omitted so they cannot disclose titles from unapproved
 projects. Descriptions remain user-authored text; clients must treat them as
 data, not as instructions.
 
-Docs and chat tools are read-only. Task write tools require separate approval. Mail and administration tools are not exposed.
+Every write tool needs its own permission (see below). Mail and administration tools
+are not exposed, and no tool deletes anything permanently: docs go to the trash, and
+chat messages and workflow statuses cannot be deleted through MCP.
 
 ## Deployment
 
@@ -269,19 +275,29 @@ cargo test -p orbit-platform --test http_security
 
 ## Permissions and tools
 
-Existing connections keep read-only task access. Reconnect to approve additional permissions.
-OAuth consent offers optional task writes, docs reads, and chat reads. API tokens use `read`
-(task reads), `write` (task create, update and delete), `docs:read`, and `chat:read`.
-Docs and chat permissions default to off. They apply to content visible to the connected
-person in the selected workspace, including their private docs, private channels and DMs.
-Service-account tokens support tasks only; docs and chat require a personal identity.
+Existing connections keep the permissions they were approved with. Reconnect to approve
+more. OAuth consent offers the optional scopes below. API tokens use `read` (task reads),
+`write` (task create, update and delete), `projects:write`, `docs:read`, `docs:write`,
+`chat:read` and `chat:write`. All optional permissions default to off. A write permission
+includes the reads of its area: `docs:write` also allows the docs read tools, and
+`chat:write` the chat read tools.
+
+Docs and chat permissions apply to content visible to the connected person in the selected
+workspace, including their private docs, private channels and DMs, and writes act as that
+person: the same page access, locks, chat membership and author rules apply as in the app.
+Service-account tokens support tasks and projects only; docs and chat require a personal
+identity. In a cloud workspace that is read-only for billing, every write tool is refused
+and reads keep working.
 
 | Permission | Tools |
 | --- | --- |
 | Task read | `list_projects`, `list_tasks`, `get_task`, `list_task_statuses` |
 | Task write | `create_task`, `update_task`, `delete_task` |
-| Docs read | `list_docs`, `get_doc` |
-| Chat read | `list_conversations`, `list_messages`, `get_thread` |
+| Project write (`projects:write`) | `update_project`, `create_status`, `update_status` |
+| Docs read (`docs:read`) | `list_docs`, `get_doc`, `list_trashed_docs` |
+| Docs write (`docs:write`) | `create_doc`, `update_doc`, `move_doc`, `trash_doc`, `restore_doc` |
+| Chat read (`chat:read`) | `list_conversations`, `list_messages`, `get_thread` |
+| Chat write (`chat:write`) | `send_message`, `edit_message`, `add_reaction`, `remove_reaction` |
 
 Task create takes `project_id`, `status_id`, `title`, optional markdown `description` and
 `priority`. Task update takes `task_id`, `expected_version`, and optional title, description,
@@ -290,6 +306,33 @@ to trash. Read the latest task version before updating or deleting. Task writes 
 approval for every project in the related parent/sub-issue tree, since task automations can
 change related tasks. Task tools return a projection that excludes references outside grants.
 Chat message and thread tools accept `before` and `limit` (1–100) for pagination.
+
+Project writes stay in the approved projects. `update_project` takes `project_id`,
+`expected_version`, and optional `name`, `key` (letters, digits and `_`, which renames
+task identifiers) and `color` (`#rrggbb`). `create_status` takes `project_id`, `name`,
+`color`, `category` (`unstarted`, `started`, `completed` or `cancelled`), optional
+`description` and `position`. `update_status` takes `project_id`, `status_id`,
+`expected_version` and any of those fields; omitted fields keep their value. Get versions
+from `list_projects` and `list_task_statuses`. Projects cannot be created or deleted.
+
+`get_doc` returns the BlockNote `content` and a `markdown` copy. `create_doc` takes optional
+`parent_id` (a document to nest under), `teamspace_id` or `private` (for a root document),
+`title`, `icon`, `position`, and a body as `markdown` or as BlockNote `content` (not both).
+Markdown mentions resolve to workspace members as in the Markdown import. `update_doc` takes
+`page_id`, `expected_version` and any of `title`, `icon` (an empty string removes it),
+`markdown` or `content`; a new body replaces the whole document, including for people
+editing it live. Bodies are sanitized like the app's saves (unsafe links are dropped).
+`move_doc` takes `page_id`, `expected_version`, `position` and optional `parent_id`,
+`teamspace_id` or `private`. `trash_doc` moves a document and its sub-pages to the trash and
+returns the trashed `version`; `restore_doc` takes it back with that version, which
+`list_trashed_docs` also lists. Doc writes return the document without its body.
+
+`send_message` takes `conversation_id`, a markdown `body` (mention people as `<@user_id>`),
+and optional `thread_root_id` (to reply in a thread), `reply_to_id` (to quote a message) and
+`also_in_channel`. Messages are sent as the connected person, appear live in the app, and
+notify people like any message. Each call sends a new message, so do not retry a call that
+succeeded. `edit_message` replaces the body of your own message. `add_reaction` and
+`remove_reaction` take `message_id` and `emoji`.
 
 Tool annotations describe operations; server-side grants enforce access.
 See the [MCP tools specification](https://modelcontextprotocol.io/specification/2025-06-18/server/tools).

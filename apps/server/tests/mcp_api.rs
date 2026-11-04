@@ -973,3 +973,553 @@ async fn task_writes_are_refused_in_a_read_only_cloud_workspace() {
         "Approved task"
     );
 }
+
+/// The fixture with docs and chat tools, a channel and a page of the owner, and a private
+/// page and private channel of another member.
+struct Content {
+    f: Fixture,
+    pages: Arc<orbit_server::repositories::pages::PageRepository>,
+    chat: Arc<orbit_server::repositories::chat::ChatRepository>,
+    outsider: Id,
+    page: Id,
+    channel: Id,
+    secret_page: Id,
+    secret_channel: Id,
+    _root: tempfile::TempDir,
+}
+
+impl Content {
+    async fn new(scopes: &str) -> Self {
+        use orbit_platform::{
+            AttachmentMutationCoordinator, LocalBlobStore, UploadLimits, UploadService,
+        };
+        use orbit_server::repositories::{
+            chat::{ChannelCreate, ChatRepository, ConversationKind},
+            pages::{CreatePage, PageRepository, SpaceRequest},
+        };
+        let mut f = Fixture::new().await;
+        let root = tempfile::tempdir().unwrap();
+        let uploads = UploadService::new(
+            (*f.database).clone(),
+            Arc::new(LocalBlobStore::new(root.path().join("files"))),
+            AttachmentMutationCoordinator::default(),
+            UploadLimits::default(),
+        );
+        let pages = Arc::new(PageRepository::new((*f.database).clone()));
+        let chat = Arc::new(ChatRepository::new((*f.database).clone(), uploads));
+        let create = |actor: Id, title: &str, private: bool| {
+            let pages = Arc::clone(&pages);
+            let title = title.to_owned();
+            let workspace = f.workspace;
+            async move {
+                pages
+                    .create_page(
+                        workspace,
+                        actor,
+                        CreatePage {
+                            parent_id: None,
+                            space: SpaceRequest {
+                                private: private.then_some(true),
+                                teamspace_id: None,
+                            },
+                            title,
+                            icon: None,
+                            position: None,
+                        },
+                        "test",
+                        TimestampMillis::now(),
+                    )
+                    .await
+                    .unwrap()
+                    .id
+            }
+        };
+        let channel = |actor: Id, name: &str, kind: ConversationKind| {
+            let chat = Arc::clone(&chat);
+            let name = name.to_owned();
+            let workspace = f.workspace;
+            async move {
+                chat.create_channel(
+                    workspace,
+                    actor,
+                    ChannelCreate {
+                        name,
+                        topic: "".into(),
+                        category_id: None,
+                        kind,
+                        member_ids: vec![],
+                    },
+                )
+                .await
+                .unwrap()
+                .value
+                .id
+            }
+        };
+        let outsider = Id::new_v7();
+        let mut tx = f.database.immediate_transaction().await.unwrap();
+        sqlx::query("INSERT INTO users (id, email, normalized_email, display_name, password_hash, created_at, updated_at) VALUES ($1, 'outsider@example.com', 'outsider@example.com', 'Outsider', 'x', 1, 1)").bind(outsider.to_string()).execute(&mut *tx).await.unwrap();
+        sqlx::query("INSERT INTO memberships (id, workspace_id, user_id, role, created_at, updated_at) VALUES ($1, $2, $3, 'member', 1, 1)").bind(Id::new_v7().to_string()).bind(f.workspace.to_string()).bind(outsider.to_string()).execute(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+        let page = create(f.user, "MCP document", false).await;
+        let secret_page = create(outsider, "Hidden private document", true).await;
+        let open = channel(f.user, "mcp-channel", ConversationKind::Public).await;
+        let secret_channel = channel(
+            outsider,
+            "hidden-private-channel",
+            ConversationKind::Private,
+        )
+        .await;
+        sqlx::query("UPDATE api_tokens SET mcp_scopes = $1 WHERE id = $2")
+            .bind(scopes)
+            .bind(f.token_id.to_string())
+            .execute(f.database.pool())
+            .await
+            .unwrap();
+        f.app = router(
+            McpState::new(Arc::new(f.tokens.clone()), Arc::new(f.tasks.clone()))
+                .with_content(Arc::clone(&pages), Arc::clone(&chat)),
+            "https://orbit.test",
+        );
+        Self {
+            f,
+            pages,
+            chat,
+            outsider,
+            page,
+            channel: open,
+            secret_page,
+            secret_channel,
+            _root: root,
+        }
+    }
+}
+
+fn ok(response: &Value) -> &Value {
+    assert!(
+        response["result"]["isError"] != true && response.get("error").is_none(),
+        "{response}"
+    );
+    &response["result"]["structuredContent"]
+}
+
+fn refused(response: &Value) -> bool {
+    response["result"]["isError"] == true || response.get("error").is_some()
+}
+
+fn tool_names(listing: &Value) -> Vec<String> {
+    listing["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn doc_writes_need_docs_write_and_keep_page_access_and_sanitizing() {
+    let c = Content::new("docs:read").await;
+    let denied =
+        c.f.tool("create_doc", json!({"title": "Not allowed"}))
+            .await;
+    assert!(denied.get("error").is_some(), "{denied}");
+
+    let c = Content::new("docs:write").await;
+    let f = &c.f;
+    let names = tool_names(&f.rpc("tools/list", json!({})).await);
+    // docs:write includes the doc reads, and nothing from chat.
+    for name in [
+        "create_doc",
+        "update_doc",
+        "move_doc",
+        "trash_doc",
+        "restore_doc",
+        "list_docs",
+        "get_doc",
+        "list_trashed_docs",
+    ] {
+        assert!(names.contains(&name.to_owned()), "{name}: {names:?}");
+    }
+    assert!(!names.contains(&"send_message".to_owned()));
+    assert!(!names.contains(&"list_conversations".to_owned()));
+
+    let created = f
+        .tool(
+            "create_doc",
+            json!({"title": "Plan", "icon": "🚀", "parent_id": c.page, "markdown": "# Goals\n\nShip **docs** tools.\n\n- one\n- two\n"}),
+        )
+        .await;
+    let created = ok(&created).clone();
+    assert!(created.get("content").is_none(), "{created}");
+    assert_eq!(created["parent_id"], c.page.to_string());
+    let id = created["id"].as_str().unwrap().to_owned();
+    let read = f.tool("get_doc", json!({"page_id": id})).await;
+    let read = ok(&read).clone();
+    assert_eq!(read["title"], "Plan");
+    assert_eq!(read["icon"], "🚀");
+    let markdown = read["markdown"].as_str().unwrap();
+    assert!(markdown.contains("# Goals"), "{markdown}");
+    assert!(markdown.contains("**docs**"), "{markdown}");
+    assert!(markdown.contains("- two"), "{markdown}");
+
+    // Raw blocks go through the same sanitizer as the HTTP route.
+    let version = read["version"].as_u64().unwrap();
+    let updated = f
+        .tool(
+            "update_doc",
+            json!({"page_id": id, "expected_version": version, "title": "Plan v2", "icon": "", "content": [
+                {"id": "a", "type": "paragraph", "content": [
+                    {"type": "link", "href": "javascript:alert(1)", "content": [{"type": "text", "text": "Click", "styles": {}}]}
+                ], "children": []}
+            ]}),
+        )
+        .await;
+    let updated = ok(&updated).clone();
+    assert_eq!(updated["title"], "Plan v2");
+    assert!(updated["icon"].is_null(), "{updated}");
+    let stored = c
+        .pages
+        .get_page(f.workspace, id.parse().unwrap(), f.user)
+        .await
+        .unwrap();
+    assert!(!json!(stored.content).to_string().contains("javascript:"));
+    assert!(json!(stored.content).to_string().contains("Click"));
+
+    let stale = f
+        .tool(
+            "update_doc",
+            json!({"page_id": id, "expected_version": version, "title": "Stale"}),
+        )
+        .await;
+    assert!(stale.to_string().contains("version changed"), "{stale}");
+    let both = f
+        .tool("update_doc", json!({"page_id": id, "expected_version": stored.version, "markdown": "x", "content": []}))
+        .await;
+    assert!(both.get("error").is_some(), "{both}");
+    let long = f
+        .tool("create_doc", json!({"title": "x".repeat(501)}))
+        .await;
+    assert!(long.get("error").is_some(), "{long}");
+
+    let moved = f
+        .tool(
+            "move_doc",
+            json!({"page_id": id, "expected_version": stored.version, "position": 0}),
+        )
+        .await;
+    let moved = ok(&moved).clone();
+    assert!(moved["parent_id"].is_null(), "{moved}");
+
+    let trashed = f
+        .tool(
+            "trash_doc",
+            json!({"page_id": id, "expected_version": moved["version"]}),
+        )
+        .await;
+    let trashed = ok(&trashed).clone();
+    let trash = f.tool("list_trashed_docs", json!({})).await;
+    assert!(ok(&trash).to_string().contains("Plan v2"), "{trash}");
+    assert!(f.tool("get_doc", json!({"page_id": id})).await["result"]["isError"] == true);
+    let restored = f
+        .tool(
+            "restore_doc",
+            json!({"page_id": id, "expected_version": trashed["version"]}),
+        )
+        .await;
+    assert_eq!(ok(&restored)["title"], "Plan v2");
+
+    // Another member's private page stays out of reach for every write.
+    for (name, arguments) in [
+        (
+            "update_doc",
+            json!({"page_id": c.secret_page, "expected_version": 0, "title": "Taken"}),
+        ),
+        (
+            "move_doc",
+            json!({"page_id": c.secret_page, "expected_version": 0, "position": 0}),
+        ),
+        (
+            "trash_doc",
+            json!({"page_id": c.secret_page, "expected_version": 0}),
+        ),
+        (
+            "create_doc",
+            json!({"parent_id": c.secret_page, "title": "Child"}),
+        ),
+    ] {
+        let denied = f.tool(name, arguments).await;
+        assert_eq!(denied["result"]["isError"], true, "{name}: {denied}");
+    }
+    let secret = c
+        .pages
+        .get_page(f.workspace, c.secret_page, c.outsider)
+        .await
+        .unwrap();
+    assert_eq!(secret.title, "Hidden private document");
+    assert_eq!(secret.version, 0);
+}
+
+#[tokio::test]
+async fn chat_writes_need_chat_write_and_act_as_the_connected_user() {
+    use orbit_server::repositories::chat::MessageCursor;
+    let c = Content::new("chat:read").await;
+    let denied =
+        c.f.tool(
+            "send_message",
+            json!({"conversation_id": c.channel, "body": "hi"}),
+        )
+        .await;
+    assert!(denied.get("error").is_some(), "{denied}");
+
+    let c = Content::new("chat:write").await;
+    let f = &c.f;
+    let names = tool_names(&f.rpc("tools/list", json!({})).await);
+    for name in [
+        "send_message",
+        "edit_message",
+        "add_reaction",
+        "remove_reaction",
+        "list_messages",
+    ] {
+        assert!(names.contains(&name.to_owned()), "{name}: {names:?}");
+    }
+    assert!(!names.contains(&"create_doc".to_owned()));
+    for name in ["delete_message", "delete_status", "purge_doc"] {
+        assert!(!names.contains(&name.to_owned()), "{name}");
+    }
+
+    let sent = f
+        .tool(
+            "send_message",
+            json!({"conversation_id": c.channel, "body": "Hello from **MCP**"}),
+        )
+        .await;
+    let sent = ok(&sent).clone();
+    assert_eq!(sent["author_id"], f.user.to_string());
+    let root = sent["id"].as_str().unwrap().to_owned();
+    let reply = f
+        .tool(
+            "send_message",
+            json!({"conversation_id": c.channel, "body": "In the thread", "thread_root_id": root}),
+        )
+        .await;
+    assert_eq!(ok(&reply)["thread_root_id"], root);
+    let edited = f
+        .tool(
+            "edit_message",
+            json!({"message_id": root, "body": "Edited"}),
+        )
+        .await;
+    assert_eq!(ok(&edited)["body"], "Edited");
+    let reacted = f
+        .tool("add_reaction", json!({"message_id": root, "emoji": "👍"}))
+        .await;
+    assert!(ok(&reacted).to_string().contains("👍"), "{reacted}");
+    let unreacted = f
+        .tool(
+            "remove_reaction",
+            json!({"message_id": root, "emoji": "👍"}),
+        )
+        .await;
+    assert!(!ok(&unreacted).to_string().contains("👍"), "{unreacted}");
+
+    let list = c
+        .chat
+        .list_messages(f.workspace, f.user, c.channel, MessageCursor::default())
+        .await
+        .unwrap();
+    let list = json!(list).to_string();
+    assert!(list.contains("Edited"), "{list}");
+
+    // Hidden conversations and other members' messages stay out of reach.
+    let hidden = f
+        .tool(
+            "send_message",
+            json!({"conversation_id": c.secret_channel, "body": "Intruder"}),
+        )
+        .await;
+    assert_eq!(hidden["result"]["isError"], true, "{hidden}");
+    let theirs = c
+        .chat
+        .send_message(
+            f.workspace,
+            c.outsider,
+            orbit_server::repositories::chat::SendInput {
+                conversation_id: c.channel,
+                thread_root_id: None,
+                reply_to_id: None,
+                body: "Mine".into(),
+                sticker_id: None,
+                file_ids: vec![],
+                online: vec![],
+                also_in_channel: false,
+                nonce: "outsider-1".into(),
+            },
+        )
+        .await;
+    // The outsider is not a member of the owner's channel unless it is public and joined.
+    if let Ok(theirs) = theirs {
+        let denied = f
+            .tool(
+                "edit_message",
+                json!({"message_id": theirs.value.id, "body": "Rewritten"}),
+            )
+            .await;
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+    }
+    let empty = f
+        .tool(
+            "send_message",
+            json!({"conversation_id": c.channel, "body": "  "}),
+        )
+        .await;
+    assert_eq!(empty["result"]["isError"], true, "{empty}");
+}
+
+#[tokio::test]
+async fn project_writes_need_projects_write_and_stay_in_granted_projects() {
+    let f = Fixture::new().await;
+    let denied = f
+        .tool(
+            "update_project",
+            json!({"project_id": f.project, "expected_version": 0, "name": "Renamed"}),
+        )
+        .await;
+    assert!(denied.get("error").is_some(), "{denied}");
+    sqlx::query("UPDATE api_tokens SET mcp_scopes = 'projects:write' WHERE id = $1")
+        .bind(f.token_id.to_string())
+        .execute(f.database.pool())
+        .await
+        .unwrap();
+    let names = tool_names(&f.rpc("tools/list", json!({})).await);
+    for name in ["update_project", "create_status", "update_status"] {
+        assert!(names.contains(&name.to_owned()), "{name}: {names:?}");
+    }
+    assert!(!names.contains(&"create_task".to_owned()));
+
+    let projects = f.tool("list_projects", json!({})).await;
+    let project = ok(&projects)["items"][0].clone();
+    let updated = f
+        .tool(
+            "update_project",
+            json!({"project_id": f.project, "expected_version": project["version"], "name": "  Renamed  ", "color": "#ABCDEF"}),
+        )
+        .await;
+    let updated = ok(&updated).clone();
+    assert_eq!(updated["name"], "Renamed");
+    assert_eq!(updated["color"], "#abcdef");
+    assert_eq!(updated["key"], project["key"]);
+    let stale = f
+        .tool("update_project", json!({"project_id": f.project, "expected_version": project["version"], "name": "Stale"}))
+        .await;
+    assert_eq!(stale["result"]["isError"], true, "{stale}");
+    let bad = f
+        .tool("update_project", json!({"project_id": f.project, "expected_version": updated["version"], "key": "no-dash"}))
+        .await;
+    assert!(bad.get("error").is_some(), "{bad}");
+
+    let status = f
+        .tool(
+            "create_status",
+            json!({"project_id": f.project, "name": "Review", "color": "#00ff00", "category": "started"}),
+        )
+        .await;
+    let status = ok(&status).clone();
+    assert_eq!(status["name"], "Review");
+    let changed = f
+        .tool(
+            "update_status",
+            json!({"project_id": f.project, "status_id": status["id"], "expected_version": status["version"], "name": "In review"}),
+        )
+        .await;
+    let changed = ok(&changed).clone();
+    assert_eq!(changed["name"], "In review");
+    assert_eq!(changed["color"], "#00ff00");
+    assert_eq!(changed["category"], "started");
+
+    // A project outside the grant is out of reach, even with a valid version.
+    let other = f
+        .tasks
+        .approved_projects(f.workspace, f.user, &[f.other_project])
+        .await
+        .unwrap()
+        .remove(0);
+    let other_status: String =
+        sqlx::query_scalar("SELECT id FROM task_statuses WHERE project_id = $1 LIMIT 1")
+            .bind(f.other_project.to_string())
+            .fetch_one(f.database.pool())
+            .await
+            .unwrap();
+    for (name, arguments) in [
+        (
+            "update_project",
+            json!({"project_id": f.other_project, "expected_version": other.version, "name": "Taken"}),
+        ),
+        (
+            "create_status",
+            json!({"project_id": f.other_project, "name": "X", "color": "#000000", "category": "started"}),
+        ),
+        (
+            "update_status",
+            json!({"project_id": f.other_project, "status_id": other_status, "expected_version": 0, "name": "Taken"}),
+        ),
+    ] {
+        let denied = f.tool(name, arguments).await;
+        assert_eq!(denied["result"]["isError"], true, "{name}: {denied}");
+    }
+    let after = f
+        .tasks
+        .approved_projects(f.workspace, f.user, &[f.other_project])
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(after.name, "Private");
+    assert_eq!(after.version, other.version);
+}
+
+#[tokio::test]
+async fn content_writes_are_refused_in_a_read_only_cloud_workspace() {
+    let c = Content::new("docs:write chat:write projects:write").await;
+    let f = &c.f;
+    sqlx::query("UPDATE workspaces SET created_at = 0, billing_exempt = 0 WHERE id = $1")
+        .bind(f.workspace.to_string())
+        .execute(f.database.pool())
+        .await
+        .unwrap();
+    let _billing = orbit_server::billing::Billing::new(
+        orbit_platform::BillingConfig::new(
+            orbit_platform::Secret::new("sk_test_unused"),
+            orbit_platform::Secret::new("whsec_unused"),
+            vec![],
+        ),
+        (*f.database).clone(),
+        "https://orbit.test",
+    );
+    for (name, arguments) in [
+        ("create_doc", json!({"title": "Created"})),
+        (
+            "update_doc",
+            json!({"page_id": c.page, "expected_version": 0, "title": "Changed"}),
+        ),
+        (
+            "send_message",
+            json!({"conversation_id": c.channel, "body": "Hello"}),
+        ),
+        (
+            "update_project",
+            json!({"project_id": f.project, "expected_version": 0, "name": "Changed"}),
+        ),
+    ] {
+        let refused_call = f.tool(name, arguments).await;
+        assert!(refused(&refused_call), "{name}: {refused_call}");
+        assert!(
+            refused_call.to_string().contains("read-only"),
+            "{name}: {refused_call}"
+        );
+    }
+    let page = c.pages.get_page(f.workspace, c.page, f.user).await.unwrap();
+    assert_eq!(page.title, "MCP document");
+    // Reads stay open.
+    let read = f.tool("get_doc", json!({"page_id": c.page})).await;
+    assert_eq!(ok(&read)["title"], "MCP document");
+}

@@ -42,7 +42,11 @@ export function ApiTokensPage() {
   const [read, setRead] = useState(true)
   const [write, setWrite] = useState(true)
   const [docsRead, setDocsRead] = useState(false)
+  const [docsWrite, setDocsWrite] = useState(false)
   const [chatRead, setChatRead] = useState(false)
+  const [chatWrite, setChatWrite] = useState(false)
+  const [projectsWrite, setProjectsWrite] = useState(false)
+  const personal = docsRead || docsWrite || chatRead || chatWrite
   const [serviceAccount, setServiceAccount] = useState(false)
   const [expiration, setExpiration] = useState<ExpirationValue>('never')
   const [issuedToken, setIssuedToken] = useState<string>()
@@ -52,7 +56,7 @@ export function ApiTokensPage() {
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    const scopes = [...(read ? ['read' as const] : []), ...(write ? ['write' as const] : []), ...(docsRead ? ['docs:read' as const] : []), ...(chatRead ? ['chat:read' as const] : [])]
+    const scopes = [...(read ? ['read' as const] : []), ...(write ? ['write' as const] : []), ...(projectsWrite ? ['projects:write' as const] : []), ...(docsRead ? ['docs:read' as const] : []), ...(docsWrite ? ['docs:write' as const] : []), ...(chatRead ? ['chat:read' as const] : []), ...(chatWrite ? ['chat:write' as const] : [])]
     if (!name.trim() || projectIds.length === 0 || scopes.length === 0) return
     const issued = await createToken.mutateAsync({ name: name.trim(), projectIds, scopes, serviceAccount, expiresInDays: expiration === 'never' ? null : Number(expiration) })
     setIssuedToken(issued.token)
@@ -97,20 +101,24 @@ export function ApiTokensPage() {
           <FieldLegend variant="label">Scopes</FieldLegend>
           <Label className="font-normal"><Checkbox checked={read} onCheckedChange={setRead} /> Read</Label>
           <Label className="font-normal"><Checkbox checked={write} onCheckedChange={setWrite} /> Write tasks (includes delete)</Label>
-          <Label className="font-normal"><Checkbox checked={docsRead} disabled={serviceAccount} onCheckedChange={setDocsRead} /> Read docs (including your private docs)</Label>
-          <Label className="font-normal"><Checkbox checked={chatRead} disabled={serviceAccount} onCheckedChange={setChatRead} /> Read chat (including your private channels and DMs)</Label>
+          <Label className="font-normal"><Checkbox checked={projectsWrite} onCheckedChange={setProjectsWrite} /> Edit projects and statuses</Label>
+          {/* A write scope includes its read scope: checking it checks read, unchecking read unchecks it. */}
+          <Label className="font-normal"><Checkbox checked={docsRead} disabled={serviceAccount} onCheckedChange={(checked) => { setDocsRead(checked); if (!checked) setDocsWrite(false) }} /> Read docs (including your private docs)</Label>
+          <Label className="font-normal"><Checkbox checked={docsWrite} disabled={serviceAccount} onCheckedChange={(checked) => { setDocsWrite(checked); if (checked) setDocsRead(true) }} /> Write docs</Label>
+          <Label className="font-normal"><Checkbox checked={chatRead} disabled={serviceAccount} onCheckedChange={(checked) => { setChatRead(checked); if (!checked) setChatWrite(false) }} /> Read chat (including your private channels and DMs)</Label>
+          <Label className="font-normal"><Checkbox checked={chatWrite} disabled={serviceAccount} onCheckedChange={(checked) => { setChatWrite(checked); if (checked) setChatRead(true) }} /> Send chat messages as you</Label>
         </FieldSet>
         {/* a choice card: the whole card toggles the checkbox and tints while checked */}
         <FieldLabel className="min-[900px]:col-span-2">
           <Field orientation="horizontal">
-            <Checkbox checked={serviceAccount} disabled={docsRead || chatRead} onCheckedChange={setServiceAccount} />
+            <Checkbox checked={serviceAccount} disabled={personal} onCheckedChange={setServiceAccount} />
             <FieldContent>
               <FieldTitle>Use a service account</FieldTitle>
               <FieldDescription>For Discord and other unattended integrations. Tokens with the same name reuse this identity.</FieldDescription>
             </FieldContent>
           </Field>
         </FieldLabel>
-        <Button className="justify-self-start" type="submit" disabled={createToken.isPending || !name.trim() || projectIds.length === 0 || (!read && !write && !docsRead && !chatRead)}>Create token</Button>
+        <Button className="justify-self-start" type="submit" disabled={createToken.isPending || !name.trim() || projectIds.length === 0 || (!read && !write && !projectsWrite && !personal)}>Create token</Button>
         {createToken.isError ? <p className="text-destructive" role="alert">The API token could not be created.</p> : null}
         </FieldGrid>
       </form>

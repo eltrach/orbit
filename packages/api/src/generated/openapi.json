@@ -36057,7 +36057,10 @@
           "read",
           "write",
           "docs:read",
-          "chat:read"
+          "docs:write",
+          "chat:read",
+          "chat:write",
+          "projects:write"
         ]
       },
       "AttachmentComment": {
